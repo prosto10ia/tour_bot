@@ -4,6 +4,7 @@ import os
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.types import BotCommand
 from aiogram.enums import ParseMode
 from dotenv import load_dotenv
 
@@ -26,6 +27,9 @@ async def main() -> None:
     bot = Bot(
         token=bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
+    await bot.set_my_commands(
+        [BotCommand(command="start", description="Открыть главное меню")]
     )
     dp = Dispatcher()
 

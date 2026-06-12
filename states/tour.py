@@ -2,8 +2,12 @@ from aiogram.fsm.state import State, StatesGroup
 
 
 class TourSelection(StatesGroup):
-    # Состояния пошагового подбора тура.
-    waiting_for_budget = State()
+    # Состояния сценария обычного подбора тура.
+    waiting_for_tour_type = State()
     waiting_for_country = State()
-    waiting_for_dates = State()
-    waiting_for_hotel_stars = State()
+    waiting_for_month = State()
+
+
+class HotTourSelection(StatesGroup):
+    # Состояние сценария горящих туров.
+    waiting_for_month = State()

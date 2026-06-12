@@ -1,45 +1,28 @@
 import os
-from datetime import datetime
-from pathlib import Path
-from urllib.parse import quote_plus
 
 from aiogram import F, Router
 from aiogram.filters import CommandStart
-from aiogram.types import BufferedInputFile, CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message
 from dotenv import load_dotenv
 
-from db import get_hot_tours, get_last_user_request, get_user_requests
+from db import get_all_requests, get_user_requests
 from keyboards.inline import (
     get_back_to_menu_keyboard,
-    get_checklist_keyboard,
     get_main_menu,
-    get_payment_keyboard,
-    get_send_manager_keyboard,
+    get_manager_menu,
 )
-from pdf import CHECKLIST_LINES, generate_checklist_pdf
 
 
 router = Router()
 
 load_dotenv()
-MANAGER_CHAT_ID = os.getenv("MANAGER_CHAT_ID")
+MANAGER_ID = os.getenv("MANAGER_ID")
+MANAGER_USERNAME = os.getenv("MANAGER_USERNAME")
 
-FAQ_TEXT = """
-<b>Контакты менеджера</b>
-Менеджер: Крис
-Telegram: @@kkriisstiii
-Телефон: нискажу
 
-<b>FAQ</b>
-1. Как подобрать тур?
-Нажмите «Подобрать тур» и ответьте на 4 шага.
-
-2. Где посмотреть свои заявки?
-В разделе «Мои заявки».
-
-3. Можно ли оплатить онлайн?
-В боте доступен учебный демо-сценарий оплаты.
-""".strip()
+def _is_manager(user_id: int) -> bool:
+    # Проверяем, является ли пользователь менеджером.
+    return bool(MANAGER_ID) and str(user_id) == MANAGER_ID
 
 
 async def _send_or_edit(callback: CallbackQuery, text: str, **kwargs) -> None:
@@ -50,188 +33,113 @@ async def _send_or_edit(callback: CallbackQuery, text: str, **kwargs) -> None:
         await callback.bot.send_message(callback.from_user.id, text, **kwargs)
 
 
+def _get_menu_text(is_manager: bool) -> str:
+    # Текст главного меню в зависимости от роли.
+    if is_manager:
+        return "Меню менеджера. Выберите действие:"
+    return "Главное меню турагентства. Выберите действие:"
+
+
+def _get_menu_markup(is_manager: bool):
+    # Клавиатура главного меню в зависимости от роли.
+    return get_manager_menu() if is_manager else get_main_menu()
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message) -> None:
-    # Приветствие и показ главного меню.
-    text = (
-        "Привет! Я бот турагентства «Мои каникулы».\n\n"
-        "Помогу подобрать тур, показать горящие предложения, сохранить ваши заявки, "
-        "сформировать чек-лист и отправить запрос менеджеру.\n\n"
-        "Выберите нужный раздел ниже."
-    )
-    await message.answer(text, reply_markup=get_main_menu())
+    # Приветствие и показ нужного главного меню.
+    is_manager = _is_manager(message.from_user.id)
+    await message.answer(_get_menu_text(is_manager), reply_markup=_get_menu_markup(is_manager))
 
 
 @router.callback_query(F.data == "menu:main")
 async def show_main_menu(callback: CallbackQuery) -> None:
     # Показываем главное меню по кнопке.
-    text = (
-        "Главное меню турагентства «Мои каникулы».\n"
-        "Выберите действие:"
+    is_manager = _is_manager(callback.from_user.id)
+    await _send_or_edit(
+        callback,
+        _get_menu_text(is_manager),
+        reply_markup=_get_menu_markup(is_manager),
     )
-    await _send_or_edit(callback, text, reply_markup=get_main_menu())
-    await callback.answer()
-
-
-@router.callback_query(F.data == "menu:hot_tours")
-async def show_hot_tours(callback: CallbackQuery) -> None:
-    # Выводим список горящих туров из базы.
-    hot_tours = get_hot_tours()
-    if hot_tours:
-        lines = ["<b>Горящие туры</b>", ""]
-        lines.extend(
-            f"{index}. {title} — {price} ₽ вместо {old_price} ₽"
-            for index, (title, price, old_price) in enumerate(hot_tours, start=1)
-        )
-        text = "\n".join(lines)
-    else:
-        text = "Сейчас горящих туров нет, но мы скоро обновим подборку."
-    await _send_or_edit(callback, text, reply_markup=get_back_to_menu_keyboard())
     await callback.answer()
 
 
 @router.callback_query(F.data == "menu:my_requests")
 async def show_my_requests(callback: CallbackQuery) -> None:
-    # Показываем сохранённые заявки конкретного пользователя.
+    # Показываем отправленные заявки пользователя.
     requests = get_user_requests(callback.from_user.id)
     if not requests:
-        text = "У вас пока нет сохранённых заявок."
+        text = "У вас пока нет отправленных заявок."
     else:
         lines = ["<b>Мои заявки</b>", ""]
-        for request_id, _, request_type, text_value, created_at in requests:
-            lines.append(
-                f"#{request_id} | {request_type} | {created_at}\n{text_value}\n"
-            )
-        text = "\n".join(lines)
+        for index, (_, title, country, season, hotel, price_text, status, _) in enumerate(
+            requests,
+            start=1,
+        ):
+            lines.append(f"<b>{index}. {title}</b>")
+            lines.append(f"Страна: {country}")
+            lines.append(f"Сезон: {season}")
+            lines.append(f"Отель: {hotel}")
+            lines.append(f"Цена: {price_text}")
+            lines.append(f"Статус: {status}")
+            lines.append("")
+        text = "\n".join(lines).strip()
 
     await _send_or_edit(callback, text, reply_markup=get_back_to_menu_keyboard())
     await callback.answer()
 
 
-@router.callback_query(F.data == "menu:payment")
-async def show_payment_menu(callback: CallbackQuery) -> None:
-    # Открываем демо-раздел оплаты.
-    text = (
-        "<b>Демо-оплата</b>\n\n"
-        "Это учебный режим. Нажмите кнопку ниже, и бот сгенерирует фейковую ссылку."
-    )
-    await _send_or_edit(callback, text, reply_markup=get_payment_keyboard())
-    await callback.answer()
-
-
-@router.callback_query(F.data == "payment:generate")
-async def generate_payment_link(callback: CallbackQuery) -> None:
-    # Генерируем учебную ссылку на оплату без реальной платёжной системы.
-    username = callback.from_user.username or f"user_{callback.from_user.id}"
-    fake_url = (
-        "https://example-pay.local/checkout?"
-        f"order={callback.from_user.id}-{int(datetime.now().timestamp())}"
-        f"&user={quote_plus(username)}"
-    )
-    text = (
-        "<b>Учебная ссылка готова</b>\n\n"
-        f"{fake_url}\n\n"
-        "Ссылка фейковая и нужна только для демонстрации."
-    )
-    await _send_or_edit(callback, text, reply_markup=get_back_to_menu_keyboard())
-    await callback.answer("Ссылка сгенерирована")
-
-
-@router.callback_query(F.data == "menu:help")
-async def show_help(callback: CallbackQuery) -> None:
-    # Показываем контакты и краткий FAQ.
-    await _send_or_edit(callback, FAQ_TEXT, reply_markup=get_back_to_menu_keyboard())
-    await callback.answer()
-
-
-@router.callback_query(F.data == "menu:checklist")
-async def show_checklist(callback: CallbackQuery) -> None:
-    # Показываем текстовый чек-лист и кнопку на PDF.
-    text = "\n".join(CHECKLIST_LINES)
-    await _send_or_edit(callback, text, reply_markup=get_checklist_keyboard())
-    await callback.answer()
-
-
-@router.callback_query(F.data == "checklist:pdf")
-async def send_checklist_pdf(callback: CallbackQuery) -> None:
-    # Генерируем PDF и отправляем его пользователю.
-    pdf_path = Path(__file__).resolve().parent.parent / "travel_checklist.pdf"
-    generate_checklist_pdf(pdf_path)
-
-    file_bytes = pdf_path.read_bytes()
-    document = BufferedInputFile(file_bytes, filename="travel_checklist.pdf")
-
-    await callback.message.answer_document(
-        document=document,
-        caption="Ваш чек-лист в PDF.",
-        reply_markup=get_back_to_menu_keyboard(),
-    )
-    await callback.answer("PDF готов")
-
-
-@router.callback_query(F.data == "menu:send_to_manager")
-async def show_send_to_manager(callback: CallbackQuery) -> None:
-    # Предлагаем отправить последнюю заявку менеджеру.
-    last_request = get_last_user_request(callback.from_user.id)
-    if last_request is None:
-        text = (
-            "Сначала создайте хотя бы одну заявку через раздел «Подобрать тур», "
-            "после этого её можно будет отправить менеджеру."
-        )
-        markup = get_back_to_menu_keyboard()
+@router.callback_query(F.data == "menu:contact_manager")
+async def contact_manager(callback: CallbackQuery) -> None:
+    # Отправляем ссылку на менеджера.
+    if MANAGER_USERNAME:
+        username = MANAGER_USERNAME.lstrip("@")
+        text = f"<b>Написать менеджеру:</b>\nhttps://t.me/{username}"
     else:
-        _, _, request_type, text_value, created_at = last_request
-        text = (
-            "<b>Последняя заявка</b>\n\n"
-            f"Тип: {request_type}\n"
-            f"Дата: {created_at}\n"
-            f"{text_value}\n\n"
-            "Отправить её менеджеру?"
-        )
-        markup = get_send_manager_keyboard()
+        text = "В .env не указан MANAGER_USERNAME. Добавьте username менеджера."
 
-    await _send_or_edit(callback, text, reply_markup=markup)
+    await _send_or_edit(callback, text, reply_markup=get_back_to_menu_keyboard())
     await callback.answer()
 
 
-@router.callback_query(F.data == "manager:send_last_request")
-async def send_last_request_to_manager(callback: CallbackQuery) -> None:
-    # Пересылаем текст последней заявки в чат менеджера.
-    if not MANAGER_CHAT_ID:
-        await _send_or_edit(
-            callback,
-            "В .env не указан MANAGER_CHAT_ID. Добавьте chat_id группы менеджеров.",
-            reply_markup=get_back_to_menu_keyboard(),
-        )
-        await callback.answer()
+@router.callback_query(F.data == "manager:requests")
+async def show_manager_requests(callback: CallbackQuery) -> None:
+    # Показываем менеджеру список поступивших заявок.
+    if not _is_manager(callback.from_user.id):
+        await callback.answer("Раздел доступен только менеджеру", show_alert=True)
         return
 
-    last_request = get_last_user_request(callback.from_user.id)
-    if last_request is None:
-        await _send_or_edit(
-            callback,
-            "У вас пока нет заявок для отправки менеджеру.",
-            reply_markup=get_back_to_menu_keyboard(),
-        )
-        await callback.answer()
-        return
+    requests = get_all_requests()
+    if not requests:
+        text = "Поступивших заявок пока нет."
+    else:
+        lines = ["<b>Поступившие заявки</b>", ""]
+        for index, (
+            _request_id,
+            user_id,
+            username,
+            full_name,
+            title,
+            country,
+            season,
+            hotel,
+            price_text,
+            status,
+            created_at,
+        ) in enumerate(requests, start=1):
+            username_text = f"@{username}" if username else "без username"
+            lines.append(f"<b>{index}. Пользователь:</b> {user_id}")
+            lines.append(f"<b>Имя:</b> {full_name}")
+            lines.append(f"<b>Username:</b> {username_text}")
+            lines.append(f"<b>Тур:</b> {title}")
+            lines.append(f"<b>Страна:</b> {country}")
+            lines.append(f"<b>Сезон:</b> {season}")
+            lines.append(f"<b>Отель:</b> {hotel}")
+            lines.append(f"<b>Цена:</b> {price_text}")
+            lines.append(f"<b>Статус:</b> {status}")
+            lines.append(f"<b>Создана:</b> {created_at}")
+            lines.append("")
+        text = "\n".join(lines).strip()
 
-    _, username, request_type, text_value, created_at = last_request
-    sender = callback.from_user.full_name
-    username_text = f"@{username}" if username else "без username"
-    manager_text = (
-        "Новая заявка в группу «Мои каникулы»\n\n"
-        f"Клиент: {sender} ({username_text})\n"
-        f"User ID: {callback.from_user.id}\n"
-        f"Тип: {request_type}\n"
-        f"Дата: {created_at}\n\n"
-        f"{text_value}"
-    )
-
-    await callback.bot.send_message(chat_id=int(MANAGER_CHAT_ID), text=manager_text)
-    await _send_or_edit(
-        callback,
-        "Заявка отправлена менеджеру.",
-        reply_markup=get_back_to_menu_keyboard(),
-    )
-    await callback.answer("Отправлено")
+    await _send_or_edit(callback, text, reply_markup=get_back_to_menu_keyboard())
+    await callback.answer()
